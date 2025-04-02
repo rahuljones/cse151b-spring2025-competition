@@ -81,7 +81,10 @@ This competition challenges participants to develop machine learning models that
    
   You can modify this preprocessing pipeline to suit your model architecture and requirements. 
   For example, precipitation data follows a skewed distribution, which may benefit from alternative normalization methods.
+ 
+### Data Visualization
 
+See the [notebooks/data-exploration-basic.ipynb](notebooks/data-exploration-basic.ipynb) notebook for a basic data exploration and visualization of the dataset.
 
 
 ## | Getting Started

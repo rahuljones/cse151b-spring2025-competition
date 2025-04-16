@@ -20,8 +20,7 @@ train_ssps:
   - "ssp585"
 
 test_ssp: "ssp245"
-test_months: 120
-val_split: 0.1
+test_months: 360
 
 batch_size: 32
 num_workers: 4

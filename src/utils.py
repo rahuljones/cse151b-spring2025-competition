@@ -131,7 +131,7 @@ def get_trainer_config(cfg: DictConfig, model=None) -> Dict[str, Any]:
     if trainer_config.get("accelerator") == "gpu" and not torch.cuda.is_available():
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             log.warning("GPU requested but CUDA not available. Using MPS (Apple Silicon) instead.")
-            trainer_config["accelerator"] = "mps"
+            trainer_config["accelerator"] = "gpu"
         else:
             log.warning("GPU requested but no GPU available. Falling back to CPU.")
             trainer_config["accelerator"] = "cpu"

@@ -15,6 +15,7 @@ from lightning.pytorch import LightningDataModule
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, Dataset
+from src.models import get_model, visualize_high_loss_samples
 
 
 try:
@@ -127,7 +128,67 @@ def _load_process_ssp_data(ds, ssp, input_variables, output_variables, member_id
     # Stack outputs along channel dimension -> dask array (time, channels, y, x)
     stacked_output_dask = da.stack(output_dasks, axis=1)
     return stacked_input_dask, stacked_output_dask
+    
+class WindowedDataset(Dataset):
+    def __init__(self, base_dataset: Dataset, window_size: int = 12):
+        """
+        base_dataset[i] returns (x_i, y_i) with
+          x_i: Tensor (C, H, W)
+          y_i: Tensor (2, H, W)
+        """
+        self.base = base_dataset
+        self.window = window_size
 
+    def __len__(self):
+        # we can only form windows up to len(base) - window
+        return len(self.base) - self.window
+
+    def __getitem__(self, idx):
+        # stack the previous `window` months
+        seq = [ self.base[i][0] for i in range(idx, idx + self.window) ]
+        x_seq = torch.stack(seq, dim=0)            # (12, 5, 48, 72)
+        # the target is the month *after* that window
+        y_target = self.base[idx + self.window][1]  # (2, 48, 72)
+        return x_seq, y_target
+
+def augment_pair(x: torch.Tensor, y: torch.Tensor, noise_std: float = 0.01):
+    """
+    x:  Tensor of shape (C_in, H, W)  or (T, C_in, H, W) if windowed.
+    y:  Tensor of shape (C_out, H, W).
+    Returns a slightly perturbed (x_aug, y_aug):
+      - Random horizontal flip (p=0.5)
+      - Additive Gaussian noise on x channels (std = noise_std)
+    """
+    # 1) Horizontal flip with p = 0.5
+    if torch.rand(1).item() < 0.5:
+        x = torch.flip(x, dims=[-1])
+        y = torch.flip(y, dims=[-1])
+
+    # 2) Add Gaussian noise to x channels
+    noise = torch.randn_like(x) * noise_std
+    x = x + noise
+
+    return x, y
+class AugmentedValDataset(Dataset):
+    def __init__(self, base_dataset: ClimateDataset, noise_std: float = 0.01, repeat_factor: int = 3):
+        super().__init__()
+        self.base = base_dataset
+        self.noise_std = noise_std
+        self.repeat_factor = repeat_factor
+        self.base_len = len(self.base)
+
+    def __len__(self):
+        # pretend there are repeat_factor × (base length) samples
+        return self.base_len * self.repeat_factor
+
+    def __getitem__(self, idx):
+        # wrap idx around so that we always draw from the "real" 120 samples
+        real_idx = idx % self.base_len
+        x, y = self.base[real_idx]
+
+        # apply the exact same augmentations you already wrote:
+        x_aug, y_aug = augment_pair(x, y, noise_std=self.noise_std)
+        return x_aug, y_aug
 
 class ClimateEmulationDataModule(LightningDataModule):
     def __init__(
@@ -245,8 +306,18 @@ class ClimateEmulationDataModule(LightningDataModule):
             test_output_raw_dask = sliced_test_output_raw_dask  # Keep unnormed for evaluation
 
         # Create datasets
+        base_train = ClimateDataset(train_input_norm_dask, train_output_norm_dask, True)
+        # base_val   = ClimateDataset(val_input_norm_dask,   val_output_norm_dask,   True)
+        base_test  = ClimateDataset(test_input_norm_dask,  test_output_raw_dask,   False)
+        base_val = ClimateDataset(val_input_norm_dask, val_output_norm_dask, output_is_normalized=True)
+
+        # 2) Wrap it in AugmentedValDataset so that each epoch delivers random flips + noise
+        self.val_dataset = AugmentedValDataset(base_val, noise_std=0.02, repeat_factor =3)
+    
+
+
         self.train_dataset = ClimateDataset(train_input_norm_dask, train_output_norm_dask, output_is_normalized=True)
-        self.val_dataset = ClimateDataset(val_input_norm_dask, val_output_norm_dask, output_is_normalized=True)
+        # self.val_dataset = ClimateDataset(val_input_norm_dask, val_output_norm_dask, output_is_normalized=True)
         self.test_dataset = ClimateDataset(test_input_norm_dask, test_output_raw_dask, output_is_normalized=False)
 
         # Log dataset sizes in a single message
@@ -311,10 +382,11 @@ class ClimateEmulationDataModule(LightningDataModule):
 
 # --- PyTorch Lightning Module ---
 class ClimateEmulationModule(pl.LightningModule):
-    def __init__(self, model: nn.Module, learning_rate: float):
+    def __init__(self, model: nn.Module, learning_rate: float, weight_decay: float):
         super().__init__()
         self.model = model
         # Access hyperparams via self.hparams object after saving, e.g., self.hparams.learning_rate
+        
         self.save_hyperparameters(ignore=["model"])
         self.criterion = nn.MSELoss()
         self.normalizer = None
@@ -511,7 +583,9 @@ class ClimateEmulationModule(pl.LightningModule):
         log.info(f"Kaggle submission saved to {filepath}")
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        lr = self.hparams.learning_rate
+        wd = self.hparams.weight_decay
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=wd)
         return optimizer
 
 
@@ -529,7 +603,7 @@ def main(cfg: DictConfig):
     model = get_model(cfg)
 
     # Create lightning module
-    lightning_module = ClimateEmulationModule(model, learning_rate=cfg.training.lr)
+    lightning_module = ClimateEmulationModule(model, learning_rate=cfg.training.lr, weight_decay = cfg.training.weight_decay)
 
     # Create lightning trainer
     trainer_config = get_trainer_config(cfg, model=model)
@@ -540,6 +614,10 @@ def main(cfg: DictConfig):
 
     # Train model
     trainer.fit(lightning_module, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
+ 
+
+
+
     log.info("Training finished.")
 
     # Test model

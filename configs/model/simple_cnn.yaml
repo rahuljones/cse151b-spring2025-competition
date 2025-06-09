@@ -1,10 +1,25 @@
 # @package _global_.model
 
 # Model type identifier
-type: simple_cnn
+# type: simple_cnn
+# # Model architecture parameters
+# kernel_size: 3
+# init_dim: 64
+# depth: 6
+# dropout_rate: 0.4
+# # @package _global_.model
 
-# Model architecture parameters
-kernel_size: 3
-init_dim: 64
-depth: 4
-dropout_rate: 0.2
+# type: cnn_rnn
+# kernel_size: 3
+# init_dim: 64
+# depth: 4
+# dropout_rate: 0.2
+# rnn_hidden_dim: 128
+type: attentionresunet
+init_dim: 28
+
+
+# RNN architecture parameters
+#hidden_size: 128
+#num_layers: 2
+#dropout_rate: 0.3
